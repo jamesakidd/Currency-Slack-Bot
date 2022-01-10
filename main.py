@@ -2,12 +2,14 @@ import slack
 import os
 import json
 import re
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, request, Response
-import requests
 from slackeventsapi import SlackEventAdapter
+from babel.numbers import get_currency_symbol
 
+print('bot running')
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
 
@@ -17,30 +19,61 @@ slack_event_adapter = SlackEventAdapter(
 client = slack.WebClient(token=os.environ['SLACK_TOKEN'])
 BOT_ID = client.api_call("auth.test")['user_id']
 
+
 @app.route('/currency', methods=['POST'])
 def currency():
     data = request.form
     params = data.get('text').split()
     response = {}
-    if len(params) != 5:
+    if (len(params) != 5 or params[2] != '=' or params[3] != '?'):
         response = {
             "response_type": "ephemeral",
             "text": "Invalid command, proper usage is: <value> <currency code> = ? <currency code>"
         }
         requests.post(data['response_url'], json=response)
+        return ''
 
-    baseValue = float(re.sub(r'[^\d.]+', '', params[0]))
+    try:
+        baseCurrency = params[1].upper()
+        convertCurrency = params[4].upper()
+        baseSymbol = get_currency_symbol(baseCurrency, locale='en_US')
+        exchangeSymbol = get_currency_symbol(convertCurrency, locale='en_US')
+        baseValue = float(re.sub(r'[^\d.]+', '', params[0]))
+    except:
+        response = {
+            "response_type": "ephemeral",
+            "text": "Invalid command, '{}' is not a valid value".format(params[0])
+        }
+        requests.post(data['response_url'], json=response)
+        return ''
 
     exchangeURL = 'https://v6.exchangerate-api.com/v6/{key}/pair/{baseCode}/{exchangeCode}'.format(
-        key=os.environ['EXCHANGE_KEY'], baseCode=params[1].upper(), exchangeCode=params[4].upper())
-    exchangeDict = json.loads(json.dumps(requests.get(exchangeURL).json()))
-    response = {
-        "response_type": "in_channel",
-        "text": "{baseVal} {baseCurr} is equal to {exVal} {exCurr}".format(baseVal=round(baseValue,2), baseCurr=params[1].upper(), exVal=round(baseValue / exchangeDict["conversion_rate"], 2), exCurr=params[4].upper())
-    }
-    requests.post(data['response_url'], json=response)
+        key=os.environ['EXCHANGE_KEY'], baseCode=baseCurrency, exchangeCode=convertCurrency)
+    exchangeDict = json.loads(json.dumps(requests.get(exchangeURL).json()))    
+
+    if(exchangeDict["result"] == "error" ):
+        response = {
+            "response_type": "ephemeral",
+            "text": exchangeDict["error-type"]
+        }
+        requests.post(data['response_url'], json=response)
+
+    else:
+        conRate = exchangeDict["conversion_rate"]
+        exchangeValue = baseValue * conRate
+
+        response = {
+            "response_type": "in_channel",
+            "text": "{baseVal} {baseCurr} is equal to {exVal} {exCurr}".format(
+            baseVal="{sym}{baseVal:,.2f}".format(sym= baseSymbol,baseVal=baseValue), 
+            baseCurr=baseCurrency, exVal="{exSym}{exval:,.2f}".format(exSym=exchangeSymbol, 
+            exval=exchangeValue),
+            exCurr=convertCurrency)
+        }
+        requests.post(data['response_url'], json=response)
 
     return ''
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=5000)
